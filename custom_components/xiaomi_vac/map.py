@@ -299,6 +299,7 @@ class MapFetcher:
         room_id_offset = (10 - min(raw_ids)) if raw_ids else 0
 
         rooms = {}
+        native_room_ids: dict[int, int] = {}
         for entry in auto_area:
             pos = entry.get("pos")
             rid = entry.get("id")
@@ -324,10 +325,21 @@ class MapFetcher:
             # misses and every room falls back to the same tint (shape
             # renders, but as one flat colour — exactly what an id-only
             # shift on the grid, not on the exposed room id, produced).
+            #
+            # IMPORTANT: card_id is a rendering-only identifier — the device's
+            # own clean-room-ids/set-room-clean MIoT action wants rid (1-9),
+            # the id it actually assigned the room. Sending card_id there
+            # (the originally-shipped behaviour) silently targets a
+            # nonexistent room on the device, which replies "area not
+            # reachable" and docks. native_room_ids carries the real id
+            # alongside, so the API/card can render with card_id but clean
+            # with rid.
             card_id = rid + room_id_offset
             rooms[card_id] = Room(rx, ry, rx, ry, card_id, name=name,
                                    pos_x=rx, pos_y=ry)
+            native_room_ids[card_id] = rid
         map_data.rooms = rooms
+        map_data._viomi_native_room_ids = native_room_ids  # noqa: SLF001
         map_data.cleaned_rooms = cleaned_areas
 
         # The pixel grid encodes room membership too — confirmed values 1..9
@@ -478,6 +490,10 @@ class MapFetcher:
             grid_extra = getattr(md, "_viomi_grid_extra", None)
             if grid_extra is not None:
                 vector.update(grid_extra)
+            native_room_ids = getattr(md, "_viomi_native_room_ids", None)
+            if native_room_ids:
+                for room in vector.get("rooms") or []:
+                    room["native_id"] = native_room_ids.get(room["id"], room["id"])
         except Exception as ex:  # noqa: BLE001
             # Decrypted fine but the parser rejected the frame (corrupt or
             # unexpected layout). The key material is good — keep the enckey.
