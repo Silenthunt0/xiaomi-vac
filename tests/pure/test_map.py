@@ -166,17 +166,17 @@ def test_vector_map_defaults_to_no_scaling():
     assert unscaled["rooms"][0]["bbox"] == [-2750.0, -6550.0, 400.0, -3750.0]
 
 
-def test_vector_map_keeps_absent_room_label_position_absent():
-    """`Room.pos_x`/`pos_y` are optional; None must not become 0.0, which the
-    card would draw as a label stranded at the origin."""
+def test_vector_map_anchors_absent_room_label_at_bbox_centre():
+    """`Room.pos_x`/`pos_y` are optional (viomi drops text_pos); the label
+    anchors at the bbox centre rather than None, so the card still draws it."""
     md = _fake_md_mm()
     md.rooms[5].pos_x = None
     md.rooms[5].pos_y = None
 
     out = map_vector.vector_map(md, b"", ijai_grid=False, units_per_metre=1000.0)
 
-    assert out["rooms"][0]["cx"] is None
-    assert out["rooms"][0]["cy"] is None
+    assert out["rooms"][0]["cx"] == -1.175
+    assert out["rooms"][0]["cy"] == -5.15
 
 
 def test_overlay_units_per_metre_only_scales_xiaomi_json_family():
