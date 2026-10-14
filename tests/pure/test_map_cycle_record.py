@@ -13,8 +13,15 @@ import pytest
 from PIL import Image
 
 from xvac.cloud.connector import CloudUnreachable
-from xvac.map import MapFetcher, SessionExpired
-from xvac.map_diagnostics import MapCycleRecord, SlotAttempt, describe_map_capability, resolve_active_id
+from xvac.map import MapFetcher, SessionExpired, _vector_source
+from xvac.map_diagnostics import (
+    MapCycleRecord,
+    SlotAttempt,
+    describe_map_capability,
+    describe_map_key_owner,
+    pick_map_key_owner,
+    resolve_active_id,
+)
 
 
 class FakeCloud:
@@ -27,6 +34,9 @@ class FakeCloud:
 
     def cloud_get_prop(self, server, did, siid, piid):
         return {"result": [{"value": None}]}
+
+    def get_user_device_data(self, server, did, siid, piid, limit=2, time_start=0):
+        return None
 
     def map_url(self, server, did, slot, endpoint):
         self.calls.append(("map_url", slot))
@@ -292,3 +302,73 @@ def test_capability_shape_of_every_registered_profile_is_serialisable():
 
     for profile in MODEL_PROFILES.values():
         json.dumps(describe_map_capability(profile.map))
+
+
+# --- map key owner source (#51) --------------------------------------------
+def test_map_key_owner_prefers_device_reported_uid():
+    assert pick_map_key_owner("222", "111", "333") == "333"
+    assert pick_map_key_owner("222", "111", None) == "222"
+    assert pick_map_key_owner(None, "111", None) == "111"
+    assert pick_map_key_owner(None, 111, None) == "111"
+
+
+def test_describe_map_key_owner_names_device_source():
+    assert describe_map_key_owner("ijai", "222", "111", "333") == ("device_7_45", False)
+    assert describe_map_key_owner("ijai", "222", "111", "111") == ("device_7_45", True)
+    assert describe_map_key_owner("ijai", "222", "111", None) == ("owner_uid", False)
+    assert describe_map_key_owner("ijai", None, "111", None) == ("user_id", None)
+    assert describe_map_key_owner("dreame", "222", "111", "333") == (None, None)
+
+
+# --- vector source after parse (#51 room fills) ----------------------------
+def test_vector_source_uses_parser_robot_map_for_ijai():
+    parser = SimpleNamespace(robot_map=SimpleNamespace(SerializeToString=lambda: b"labelled"))
+    assert _vector_source(parser, b"raw", True) == b"labelled"
+
+
+def test_vector_source_keeps_unpacked_when_not_ijai_or_no_robot_map():
+    parser = SimpleNamespace(robot_map=SimpleNamespace(SerializeToString=lambda: b"labelled"))
+    assert _vector_source(parser, b"raw", False) == b"raw"
+    assert _vector_source(SimpleNamespace(), b"raw", True) == b"raw"
+
+
+# --- ijai key type fallback (#51 hex key) ----------------------------------
+def _ijai_fetcher(cloud):
+    return MapFetcher(
+        cloud, server="de", user_id="1", device_id="2",
+        model="xiaomi.vacuum.d106gl", mac="AA:BB:CC:DD:EE:FF", wifi_sn="12345/ABCDE12345FGHIJ",
+        parser_brand="ijai")
+
+
+def _encrypt_ijai(plain: bytes, *, hex_key: bool, **kw) -> bytes:
+    """Encrypt a RobotMap payload the way the cloud does, for one key type."""
+    import zlib
+
+    from Crypto.Cipher import AES
+    from Crypto.Hash import MD5
+    from Crypto.Util.Padding import pad
+    from vacuum_map_parser_ijai import aes_decryptor
+
+    mac_part = "".join(kw["device_mac"].lower().split(":"))
+    suffix = kw["model"].split(".")[-1][-4:]
+    aeskey = aes_decryptor.aes_encrypt(
+        "+".join([kw["wifi_sn"], kw["owner_id"], kw["device_id"]]), mac_part + suffix)
+    digest = MD5.new(aeskey.encode("utf-8")).hexdigest()
+    key = bytes.fromhex(digest) if hex_key else digest[8:-8].upper().encode("utf-8")
+    body = zlib.compress(plain).hex().encode("utf-8")
+    return AES.new(key, AES.MODE_ECB).encrypt(pad(body, AES.block_size, "pkcs7"))
+
+
+@pytest.mark.parametrize("hex_key", [True, False])
+def test_ijai_unpack_tries_both_key_types(hex_key):
+    f = _ijai_fetcher(FakeCloud())
+    blob = _encrypt_ijai(b"\x08\x01robotmap", hex_key=hex_key, **f._unpack_kw)
+
+    assert f._unpack(blob) == b"\x08\x01robotmap"
+    assert f.last_key_type == ("hex" if hex_key else "text")
+
+
+def test_ijai_unpack_raises_when_neither_key_fits():
+    f = _ijai_fetcher(FakeCloud())
+    with pytest.raises(Exception):
+        f._unpack(b"\x00" * 32)

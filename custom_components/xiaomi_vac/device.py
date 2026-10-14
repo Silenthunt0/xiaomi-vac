@@ -1,6 +1,8 @@
 """Local MIoT client for ijai-family vacuums (synchronous; wrap in executor under HA)."""
 from __future__ import annotations
 
+import re
+
 import json
 import logging
 from dataclasses import dataclass
@@ -22,6 +24,20 @@ class DeviceCommunicationError(Exception):
 # is a range rather than a whitelist (issue #4).
 _WIFI_SN_MIN_LEN = 16
 _WIFI_SN_MAX_LEN = 24
+
+
+_OWNER_UID_RE = re.compile(r';(\d+)"')
+
+
+def parse_reported_owner_uid(raw) -> str | None:
+    """Pull the owner uid out of a siid 7/piid 45 value.
+
+    @param raw: the property value, a bracketed list rendered as a string that
+        carries one "<serial>;<uid>" element.
+    @returns: the digits after ";" or None when the value has no such element.
+    """
+    found = _OWNER_UID_RE.search(str(raw or ""))
+    return found.group(1) if found else None
 
 
 def _is_wifi_sn(value: str) -> bool:
@@ -464,6 +480,21 @@ class IjaiVacuumDevice:
             return self._dev.info().mac_address
         except Exception:  # noqa: BLE001
             return None
+
+    def get_reported_owner_uid(self) -> str | None:
+        """The uid the vacuum reports for its owner in siid 7/piid 45, if any.
+
+        @returns: the uid string, or None when the read fails or carries no uid.
+        """
+        try:
+            raw = self._dev.get_property_by(7, 45)[0].get("value", "")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("owner uid: siid 7/piid 45 read failed: %s", err)
+            return None
+        uid = parse_reported_owner_uid(raw)
+        if uid is None:
+            _LOGGER.debug("owner uid: siid 7/piid 45 value carried no ';<uid>' part")
+        return uid
 
     def get_wifi_sn(self, user_id: str | None = None) -> str | None:
         """Serial used to seed the map AES key (siid 1, piid 5 on 2022+ models)."""

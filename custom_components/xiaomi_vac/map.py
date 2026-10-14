@@ -24,6 +24,7 @@ from .map_parsers import (
     dreame_extract_enckey,
     has_ijai_grid,
     has_json_grid,
+    ijai_unpack_any_key,
     make_parser,
     map_url_endpoint,
     overlay_units_per_metre,
@@ -77,6 +78,28 @@ _DRAWABLES = [
     Drawable.PATH, Drawable.CHARGER, Drawable.VACUUM_POSITION,
     Drawable.ROOM_NAMES, Drawable.NO_GO_AREAS, Drawable.VIRTUAL_WALLS,
 ]
+
+
+def _vector_source(parser, unpacked: bytes, ijai_grid: bool) -> bytes:
+    """Pick the bytes the grid extractor reads after parse().
+
+    @param parser: the brand parser that just ran parse().
+    @param unpacked: the decrypted blob handed to parse().
+    @param ijai_grid: True when the blob is an ijai RobotMap protobuf.
+    @returns: the parser's post-parse RobotMap when it has one, else unpacked.
+    """
+    # ijai labels "non painted" grids (only 0/127/128 cells) by room inside
+    # parse(), mutating its own robot_map. Serialise that so the card's room
+    # raster sees the labelled cells instead of the unlabelled upload.
+    if not ijai_grid:
+        return unpacked
+    robot_map = getattr(parser, "robot_map", None)
+    if robot_map is None or not hasattr(robot_map, "SerializeToString"):
+        return unpacked
+    try:
+        return robot_map.SerializeToString()
+    except Exception:  # noqa: BLE001
+        return unpacked
 
 
 class SessionExpired(Exception):
@@ -158,6 +181,8 @@ class MapFetcher:
         self._enckey_polled = False
         # What the most recent fetch() call did; overwritten by every call.
         self.last_attempt: SlotAttempt | None = None
+        # ijai only: which AES key type ("hex" or "text") last decrypted a blob.
+        self.last_key_type: str | None = None
 
     def _get_dreame_enckey(self) -> str | None:
         """Fetch the dreame cloud map encryption key (siid=6/piid=3).
@@ -214,6 +239,11 @@ class MapFetcher:
         if self._brand == "xiaomi":
             from .xiaomi_json_decrypt import decrypt_xiaomi_json_map
             return decrypt_xiaomi_json_map(raw, self._model, self._device_id)
+        if self._brand == "ijai":
+            # Upstream picks hex vs text key by a model list that misses some
+            # aliases (d106gl, b106bk). Try the likely type first, then the other.
+            unpacked, self.last_key_type = ijai_unpack_any_key(raw, **self._unpack_kw)
+            return unpacked
         return self._parser.unpack_map(raw, **self._unpack_kw)
 
     def fetch(self, slot: str = "0") -> MapResult | None:
@@ -230,6 +260,7 @@ class MapFetcher:
             _LOGGER.debug("dreame enckey poll: %s",
                           "found" if self._enckey else "not found (unencrypted or unavailable)")
         attempt = self.last_attempt = SlotAttempt(slot=slot)
+        self.last_key_type = None
         try:
             url = self._cloud.map_url(self._server, self._device_id, slot, self._endpoint)
         except CloudUnreachable:
@@ -270,7 +301,8 @@ class MapFetcher:
         try:
             md = self._parser.parse(unpacked)
             vector = map_vector.vector_map(
-                md, unpacked, ijai_grid=self._ijai_grid,
+                md, _vector_source(self._parser, unpacked, self._ijai_grid),
+                ijai_grid=self._ijai_grid,
                 json_grid=self._json_grid,
                 units_per_metre=self._overlay_units,
                 carpets=carpets,
@@ -316,6 +348,7 @@ class MapFetcher:
             "image_height": cropped.height,
         }
         attempt.outcome = "rendered"
+        attempt.key_type = self.last_key_type
         return MapResult(
             image_png=buf.getvalue(),
             attributes=attributes,

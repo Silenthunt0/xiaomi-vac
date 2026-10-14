@@ -39,6 +39,7 @@ from .map_diagnostics import (
     UploadRequest,
     describe_map_capability,
     describe_map_key_owner,
+    pick_map_key_owner,
     resolve_active_id,
 )
 from .map_parsers import parser_key, required_map_key_inputs
@@ -102,6 +103,8 @@ class XiaomiMapCoordinator(DataUpdateCoordinator[MapResult]):
         self._control = control
         self._cloud: XiaomiCloud | None = None
         self._fetcher: MapFetcher | None = None
+        # ijai: owner uid the vacuum reported in siid 7/piid 45 at build time.
+        self._device_owner_uid: str | None = None
         self._cache: MapCache | None = None
         # Last successful get-map-list read ([{name,id,cur}...]), kept up to date
         # every cycle EVEN WHEN no map decrypts, so the "Active Map" select can
@@ -386,10 +389,26 @@ class XiaomiMapCoordinator(DataUpdateCoordinator[MapResult]):
                 "Missing map key input mac: could not read it live or from storage"
             )
 
+        # The AES key owner is the uid the vacuum itself reports (siid 7/piid
+        # 45), which can differ from both the signed-in account and the owner
+        # uid on Xiaomi's device record (#51). Fall back to those in turn.
+        self._device_owner_uid = (
+            self._device.get_reported_owner_uid() if brand == "ijai" else None
+        )
+        key_owner = pick_map_key_owner(
+            d.get(CONF_OWNER_UID), d[CONF_USER_ID], self._device_owner_uid
+        )
+        _LOGGER.debug(
+            "Map key owner: source=%s matches_user_id=%s",
+            *describe_map_key_owner(
+                brand, d.get(CONF_OWNER_UID), d[CONF_USER_ID], self._device_owner_uid
+            ),
+        )
+
         return MapFetcher(
             cloud,
             server=d[CONF_SERVER],
-            user_id=d.get(CONF_OWNER_UID) or d[CONF_USER_ID],
+            user_id=key_owner,
             device_id=d[CONF_DEVICE_ID],
             model=d[CONF_MODEL],
             mac=mac,
@@ -514,6 +533,13 @@ class XiaomiMapCoordinator(DataUpdateCoordinator[MapResult]):
             if self._fetcher is None:
                 self._fetcher = await self.hass.async_add_executor_job(self._build)
                 self._persist_pending_entry_updates()
+            (
+                self.last_cycle.map_key_owner_source,
+                self.last_cycle.map_key_owner_matches_user_id,
+            ) = describe_map_key_owner(
+                cycle_parser, self.entry.data.get(CONF_OWNER_UID),
+                self.entry.data[CONF_USER_ID], self._device_owner_uid,
+            )
             cache = await self._ensure_cache()
 
             # The map list (distinct physical maps) drives multi-map; best-effort

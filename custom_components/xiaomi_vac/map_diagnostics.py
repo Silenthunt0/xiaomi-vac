@@ -12,6 +12,8 @@ class SlotAttempt:
     url_obtained: bool = False
     blob_bytes: int | None = None
     outcome: str = "incomplete"
+    # ijai only: "hex" or "text", the AES key type that decrypted this slot.
+    key_type: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -19,6 +21,7 @@ class SlotAttempt:
             "url_obtained": self.url_obtained,
             "blob_bytes": self.blob_bytes,
             "outcome": self.outcome,
+            "key_type": self.key_type,
         }
 
 
@@ -83,21 +86,37 @@ def resolve_active_id(
 
 
 def describe_map_key_owner(
-    parser: str, owner_uid: str | None, user_id: str
+    parser: str, owner_uid: str | None, user_id: str, device_uid: str | None = None,
 ) -> tuple[str | None, bool | None]:
-    """Name the id that feeds the map key and whether the two candidate ids match.
+    """Name the id that feeds the map key and whether it matches the signed-in uid.
 
     @param parser: the profile's parser key.
     @param owner_uid: the entry's stored device-owner uid, if any.
     @param user_id: the signed-in account's uid.
-    @returns: (source, matches): source "owner_uid", "user_id" or None (non-ijai);
-        matches is None when there is no stored owner_uid.
+    @param device_uid: the uid the vacuum itself reports in siid 7/piid 45, if read.
+    @returns: (source, matches): source "device_7_45", "owner_uid", "user_id" or
+        None (non-ijai); matches is None when the source is user_id itself.
     """
     if parser != "ijai":
         return None, None
+    if device_uid:
+        return "device_7_45", str(device_uid) == str(user_id)
     if not owner_uid:
         return "user_id", None
     return "owner_uid", str(owner_uid) == str(user_id)
+
+
+def pick_map_key_owner(
+    owner_uid: str | None, user_id: str, device_uid: str | None = None,
+) -> str:
+    """The uid that feeds the ijai map key, most trusted source first.
+
+    @param owner_uid: the entry's stored device-owner uid, if any.
+    @param user_id: the signed-in account's uid.
+    @param device_uid: the uid the vacuum reports in siid 7/piid 45, if read.
+    @returns: device_uid, else owner_uid, else user_id, as a string.
+    """
+    return str(device_uid or owner_uid or user_id)
 
 
 @dataclass
