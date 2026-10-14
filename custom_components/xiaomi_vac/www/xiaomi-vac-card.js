@@ -40,7 +40,7 @@ const modelShort = (m) => {
 };
 // shape 1 is the default fallback for unmapped models
 const MODEL_SHAPE = Object.fromEntries([
-  [1, ["dreame.mb1808","dreame.mc1808","xiaomi.ov21cn","xiaomi.ov21gl","xiaomi.ov31gl","xiaomi.ov42gl","xiaomi.ov43gb","xiaomi.pv21cn","dreame.md1808","dreame.p2008","dreame.p2140a","dreame.p2140o","dreame.p2140p","ijai.v10","ijai.v14"]],
+  [1, ["dreame.mb1808","dreame.mc1808","xiaomi.e101gb","xiaomi.ov21cn","xiaomi.ov21gl","xiaomi.ov31gl","xiaomi.ov42gl","xiaomi.ov43gb","xiaomi.pv21cn","dreame.md1808","dreame.p2008","dreame.p2140a","dreame.p2140o","dreame.p2140p","ijai.v10","ijai.v14"]],
   [2, ["dreame.p2029","dreame.p2028","dreame.p2028a","dreame.p2150b","dreame.p2150o"]],
   [3, ["xiaomi.ov51gl","ijai.v2","ijai.v3","xiaomi.c104","rockrobo.v1","xiaomi.d110ch","xiaomi.d103cn","xiaomi.d102gl","xiaomi.d102ev","xiaomi.d101","xiaomi.c107","xiaomi.c102gl","xiaomi.c102cn","xiaomi.c101eu","xiaomi.c101","dreame.p2114a","dreame.p2114o","dreame.r2210","dreame.r2209","dreame.r2211o","dreame.r2228","dreame.r2228o","dreame.r2228z","dreame.r2232a","dreame.r2233","dreame.r2246","dreame.r2247","dreame.r2254","dreame.s5"]],
   [4, ["ijai.v17","ijai.v18","ijai.v19","xiaomi.b106eu"]],
@@ -102,6 +102,7 @@ const ZONE_CLEAN_MODELS = new Set([
   "xiaomi.vacuum.d102ev",
   "xiaomi.vacuum.d102gl",
   "xiaomi.vacuum.d109gl",
+  "xiaomi.vacuum.e101gb",
   "xiaomi.vacuum.ov21gl",
   "xiaomi.vacuum.ov21cn",
   "xiaomi.vacuum.ov43gb",
@@ -768,24 +769,47 @@ class XiaomiVacCard extends HTMLElement {
       s += `<path class="rm" data-id="${p.id}" role="button" tabindex="0" aria-pressed="false" aria-label="Clean ${esc(nm)}" d="${dpath(p.rings)}" fill="${fill}" stroke="none"/>`;
     });
     // virtual walls — a user-drawn no-cross line, not real geometry, so render it
-    // as a faint dashed hint rather than a solid bar that fights the rooms
+    // as a faint dashed hint rather than a solid bar that fights the rooms.
+    // pointer-events:none throughout below: these are annotations drawn OVER
+    // the room polygons, never meant to be individually tappable — without
+    // it, a dense enough overlay (e.g. many overlapping travelled-path
+    // segments in a small, thoroughly-cleaned room) visually AND hit-test
+    // covers the room underneath, so taps there silently stop selecting it.
     (m.walls || []).forEach((w) => {
-      s += `<line x1="${tx(w[0])}" y1="${ty(w[1])}" x2="${tx(w[2])}" y2="${ty(w[3])}" stroke="var(--xv-muted)" stroke-width="0.05" stroke-linecap="round" stroke-dasharray="0.16 0.13" opacity=".35"/>`;
+      s += `<line x1="${tx(w[0])}" y1="${ty(w[1])}" x2="${tx(w[2])}" y2="${ty(w[3])}" stroke="var(--xv-muted)" stroke-width="0.05" stroke-linecap="round" stroke-dasharray="0.16 0.13" opacity=".35" pointer-events="none"/>`;
     });
     if (Array.isArray(m.path_segments)) {
       m.path_segments.forEach((segment) => {
         if (Array.isArray(segment) && segment.length > 1) {
-          s += `<polyline points="${segment.map(([x, y]) => `${tx(x)},${ty(y)}`).join(" ")}" fill="none" stroke="var(--xv-accent)" stroke-width="0.07" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>`;
+          s += `<polyline points="${segment.map(([x, y]) => `${tx(x)},${ty(y)}`).join(" ")}" fill="none" stroke="var(--xv-accent)" stroke-width="0.07" stroke-linecap="round" stroke-linejoin="round" opacity=".9" pointer-events="none"/>`;
         }
       });
     } else if (Array.isArray(m.path) && m.path.length > 1) {
-      s += `<polyline points="${m.path.map(([x, y]) => `${tx(x)},${ty(y)}`).join(" ")}" fill="none" stroke="var(--xv-accent)" stroke-width="0.07" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>`;
+      s += `<polyline points="${m.path.map(([x, y]) => `${tx(x)},${ty(y)}`).join(" ")}" fill="none" stroke="var(--xv-accent)" stroke-width="0.07" stroke-linecap="round" stroke-linejoin="round" opacity=".9" pointer-events="none"/>`;
     }
     (m.carpets || []).forEach((carpet) => {
       if (!Array.isArray(carpet) || carpet.length !== 8) return;
       const points = [[carpet[0], carpet[1]], [carpet[2], carpet[3]],
         [carpet[4], carpet[5]], [carpet[6], carpet[7]]];
-      s += `<path d="${ring(points)}" fill="#d2aa5a" fill-opacity="0.28" stroke="#d2aa5a" stroke-opacity="0.55" stroke-width="0.03"/>`;
+      s += `<path d="${ring(points)}" fill="#d2aa5a" fill-opacity="0.28" stroke="#d2aa5a" stroke-opacity="0.55" stroke-width="0.03" pointer-events="none"/>`;
+    });
+    // no-go / no-mop zones — same quadrilateral shape as carpets, styled as a
+    // hazard area (red hatch-ish fill + dashed border) so it reads distinctly
+    // from both carpets (tan, solid border) and virtual walls (a plain line).
+    // pointer-events:none: this is an annotation drawn over room polygons,
+    // never meant to be individually tappable — otherwise a zone covering
+    // most of a room would intercept taps meant to select that room.
+    (m.no_go || []).forEach((zone) => {
+      if (!Array.isArray(zone) || zone.length !== 8) return;
+      const points = [[zone[0], zone[1]], [zone[2], zone[3]],
+        [zone[4], zone[5]], [zone[6], zone[7]]];
+      s += `<path d="${ring(points)}" fill="#e2483d" fill-opacity="0.18" stroke="#e2483d" stroke-opacity="0.75" stroke-width="0.04" stroke-dasharray="0.12 0.1" pointer-events="none"/>`;
+    });
+    (m.no_mop || []).forEach((zone) => {
+      if (!Array.isArray(zone) || zone.length !== 8) return;
+      const points = [[zone[0], zone[1]], [zone[2], zone[3]],
+        [zone[4], zone[5]], [zone[6], zone[7]]];
+      s += `<path d="${ring(points)}" fill="#4696e8" fill-opacity="0.16" stroke="#4696e8" stroke-opacity="0.65" stroke-width="0.04" stroke-dasharray="0.1 0.08" pointer-events="none"/>`;
     });
     if (this._enabled("show_room_labels")) rooms.forEach((r) => {
       if (r.cx == null || !r.name) return;

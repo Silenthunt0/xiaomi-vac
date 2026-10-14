@@ -1007,6 +1007,18 @@ XIAOMI_OV51GL = replace(
     consumables=None,
 )
 
+# xiaomi.vacuum.e101gb — every wired siid/piid/aiid and value table matches
+# ov21gl in the public spec (urn ...:xiaomi-e101gb:1 vs ...:xiaomi-ov21gl:2,
+# compared property by property); consumables unverified (see ov71gl note above).
+# Its cloud map is the xiaomi JSON format (already routed in map_parsers.py).
+XIAOMI_E101GB = replace(
+    XIAOMI_OV21GL,
+    profile_id='xiaomi.e101gb',
+    notes=("urn:miot-spec-v2:device:vacuum:0000A006:xiaomi-e101gb:1",),
+    zone_sweep=ZoneSweepCapability(start=Action(2, 37, in_piid=12)),  # start-zone-sweep / zone-ids
+    consumables=None,
+)
+
 # xiaomi.vacuum.ov21cn (Mijia 5 Pro) — every wired siid/piid/aiid and value table
 # matches ov21gl in the public spec; consumables unverified (see ov71gl note above).
 XIAOMI_OV21CN = replace(
