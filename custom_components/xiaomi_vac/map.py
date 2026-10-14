@@ -25,6 +25,7 @@ from .map_parsers import (
     dreame_extract_enckey,
     has_ijai_grid,
     has_json_grid,
+    ijai_hex_key_first,
     ijai_unpack_any_key,
     make_parser,
     map_url_endpoint,
@@ -242,9 +243,14 @@ class MapFetcher:
             return decrypt_xiaomi_json_map(raw, self._model, self._device_id)
         if self._brand == "ijai":
             # Upstream picks hex vs text key by a model list that misses some
-            # aliases (d106gl, b106bk). Try the likely type first, then the other.
-            unpacked, self.last_key_type = ijai_unpack_any_key(raw, **self._unpack_kw)
-            return unpacked
+            # aliases. Let the parser try its own choice first, then the other type.
+            try:
+                unpacked = self._parser.unpack_map(raw, **self._unpack_kw)
+                self.last_key_type = "hex" if ijai_hex_key_first(self._model) else "text"
+                return unpacked
+            except ValueError:
+                unpacked, self.last_key_type = ijai_unpack_any_key(raw, **self._unpack_kw)
+                return unpacked
         if self._brand == "viomi" and raw.startswith(b"\x1f\x8b"):
             # Some viomi profiles (confirmed on v22) upload a gzip-wrapped blob
             # instead of the raw zlib stream ViomiMapDataParser.unpack_map()

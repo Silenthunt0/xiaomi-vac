@@ -392,8 +392,9 @@ class XiaomiMapCoordinator(DataUpdateCoordinator[MapResult]):
         # The AES key owner is the uid the vacuum itself reports (siid 7/piid
         # 45), which can differ from both the signed-in account and the owner
         # uid on Xiaomi's device record (#51). Fall back to those in turn.
+        reported = self._device.get_reported_owner_uid() if brand == "ijai" else None
         self._device_owner_uid = (
-            self._device.get_reported_owner_uid() if brand == "ijai" else None
+            reported if isinstance(reported, str) and reported.isdigit() else None
         )
         key_owner = pick_map_key_owner(
             d.get(CONF_OWNER_UID), d[CONF_USER_ID], self._device_owner_uid

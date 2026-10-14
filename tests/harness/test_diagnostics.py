@@ -130,8 +130,10 @@ async def test_diagnostics_download_returns_last_map_cycle(
         "session_expired": False,
         "rendered": False,
         "slots": [
-            {"slot": "0", "url_obtained": True, "blob_bytes": 14, "outcome": "undecryptable"},
-            {"slot": "1", "url_obtained": True, "blob_bytes": 14, "outcome": "undecryptable"},
+            {"slot": "0", "url_obtained": True, "blob_bytes": 14, "outcome": "undecryptable",
+             "key_type": None},
+            {"slot": "1", "url_obtained": True, "blob_bytes": 14, "outcome": "undecryptable",
+             "key_type": None},
         ],
         "resolved_map_id": 7,
         "resolved_by": "map_list",

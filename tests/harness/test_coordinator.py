@@ -222,6 +222,7 @@ async def test_map_coordinator_map_key_owner_is_device_owner_else_logged_in_user
     device.profile = SimpleNamespace(brand="ijai", profile_id="ijai.v17", map=None)
     device.get_wifi_sn.return_value = "A" * 18
     device.get_mac.return_value = "AA:BB:CC:DD:EE:FF"
+    device.get_reported_owner_uid.return_value = None
     control = MagicMock()
     control.data = None
     coord = XiaomiMapCoordinator(hass, entry, device, control)
@@ -233,6 +234,30 @@ async def test_map_coordinator_map_key_owner_is_device_owner_else_logged_in_user
         coord._build()
 
     assert fetcher.call_args.kwargs["user_id"] == expected_owner_id
+
+
+async def test_map_coordinator_map_key_owner_prefers_uid_the_vacuum_reports(
+    hass: HomeAssistant,
+) -> None:
+    """The uid from siid 7/piid 45 wins over the stored owner uid and the login."""
+    entry = _map_entry("ijai.vacuum.v17")
+    entry.data[CONF_OWNER_UID] = "7777777777"
+    device = MagicMock()
+    device.profile = SimpleNamespace(brand="ijai", profile_id="ijai.v17", map=None)
+    device.get_wifi_sn.return_value = "A" * 18
+    device.get_mac.return_value = "AA:BB:CC:DD:EE:FF"
+    device.get_reported_owner_uid.return_value = "9999999999"
+    control = MagicMock()
+    control.data = None
+    coord = XiaomiMapCoordinator(hass, entry, device, control)
+
+    with (
+        patch("custom_components.xiaomi_vac.map_coordinator.XiaomiCloud"),
+        patch("custom_components.xiaomi_vac.map_coordinator.MapFetcher") as fetcher,
+    ):
+        coord._build()
+
+    assert fetcher.call_args.kwargs["user_id"] == "9999999999"
 
 
 @pytest.mark.parametrize(
