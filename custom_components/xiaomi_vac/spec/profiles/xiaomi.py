@@ -999,12 +999,14 @@ XIAOMI_OV43GB = replace(
 # xiaomi.vacuum.ov51gl (Xiaomi Robot Vacuum H40) — every wired siid/piid/aiid
 # and value table matches ov21gl in the public spec; consumables unverified
 # (see ov71gl note above).
+# Consumables (2026-10-14): ov51gl spec has the same mop(9), brushes(12/13),
+# filter(14) and dust-bag(19) services as ov21gl, and an H40 owner reads all
+# five via MIoT (#39), so the ov21gl block is inherited.
 XIAOMI_OV51GL = replace(
     XIAOMI_OV21GL,
     profile_id='xiaomi.ov51gl',
     notes=("urn:miot-spec-v2:device:vacuum:0000A006:xiaomi-ov51gl:1",),
     zone_sweep=ZoneSweepCapability(start=Action(2, 37, in_piid=12)),  # start-zone-sweep / zone-ids
-    consumables=None,
 )
 
 # xiaomi.vacuum.e101gb — every wired siid/piid/aiid and value table matches

@@ -44,13 +44,14 @@ def test_ov31gl_exposes_verified_base_station_capability() -> None:
     assert profile.base_station.empty_dust_bin == Action(2, 18)
 
 
-def test_ov51gl_resolves_card_baseline_without_consumables() -> None:
+def test_ov51gl_resolves_card_baseline_with_ov21gl_consumables() -> None:
     profile = get_profile("xiaomi.vacuum.ov51gl")
 
     assert is_supported("xiaomi.vacuum.ov51gl")
     assert card_baseline_gaps(profile) == ()
     assert profile is not None
-    assert profile.consumables is None
+    assert profile.consumables == get_profile("xiaomi.vacuum.ov21gl").consumables
+    assert profile.consumables.dust_bag_life == Prop(19, 1)
     assert profile.room_clean is not None
     assert profile.room_clean.room_ids == Prop(2, 15)
     assert profile.room_clean.start == Action(2, 16, in_piid=15)
