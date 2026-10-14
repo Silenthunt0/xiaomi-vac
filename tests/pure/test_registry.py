@@ -56,6 +56,19 @@ def test_ov51gl_resolves_card_baseline_without_consumables() -> None:
     assert profile.room_clean.start == Action(2, 16, in_piid=15)
 
 
+def test_e101gb_resolves_card_baseline_without_consumables() -> None:
+    profile = get_profile("xiaomi.vacuum.e101gb")
+
+    assert is_supported("xiaomi.vacuum.e101gb")
+    assert card_baseline_gaps(profile) == ()
+    assert profile is not None
+    assert profile.profile_id == "xiaomi.e101gb"
+    assert profile.consumables is None
+    assert profile.room_clean is not None
+    assert profile.room_clean.room_ids == Prop(2, 15)
+    assert profile.room_clean.start == Action(2, 16, in_piid=15)
+
+
 def test_pv21cn_resolves_card_baseline_without_mop_mode() -> None:
     profile = get_profile("xiaomi.vacuum.pv21cn")
 
@@ -87,8 +100,8 @@ def test_registry_counts_match_card_baseline() -> None:
     supported = [model for model in MODEL_PROFILES if is_supported(model)]
     rejected = [model for model in MODEL_PROFILES if not is_supported(model)]
 
-    assert len(MODEL_PROFILES) == 99
-    assert len(supported) == 85
+    assert len(MODEL_PROFILES) == 100
+    assert len(supported) == 86
     assert len(rejected) == 14
 
 
