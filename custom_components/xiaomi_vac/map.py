@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import logging
 import zlib
 from dataclasses import dataclass, field
@@ -159,7 +160,25 @@ class MapFetcher:
         self.last_attempt: SlotAttempt | None = None
 
     def _get_dreame_enckey(self) -> str | None:
-        """Poll siid=6/piid=3 for the dreame cloud map encryption key."""
+        """Fetch the dreame cloud map encryption key (siid=6/piid=3).
+
+        Prefers the /user/get_user_device_data property-history endpoint:
+        several dreame models (verified live: dreame.vacuum.r2211o) reject
+        live /miotspec/prop/get reads with -704030013 but publish the
+        object_name as `["<path>,<enckey>"]` via the history API — the same
+        source Tasshack's dreame-vacuum uses. Falls back to the live spec
+        read for models where that works.
+        """
+        try:
+            history = self._cloud.get_user_device_data(
+                self._server, self._device_id, _DREAME_ENCKEY_SIID, _DREAME_ENCKEY_PIID)
+            if history:
+                val = json.loads(history[0]["value"])[0]
+                enckey = dreame_extract_enckey(val)
+                if enckey:
+                    return enckey
+        except (ValueError, KeyError, TypeError, IndexError):
+            _LOGGER.debug("dreame enckey history read failed; falling back to miotspec")
         resp = self._cloud.cloud_get_prop(
             self._server, self._device_id, _DREAME_ENCKEY_SIID, _DREAME_ENCKEY_PIID)
         try:

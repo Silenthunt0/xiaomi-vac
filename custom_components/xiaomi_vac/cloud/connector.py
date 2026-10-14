@@ -505,6 +505,25 @@ class XiaomiCloud:
         body = {"params": [{"did": str(did), "siid": siid, "piid": piid}]}
         return self._call(url, {"data": json.dumps(body)})
 
+    def get_user_device_data(self, server: str, did: str, siid: int, piid: int,
+                             limit: int = 2, time_start: int = 0) -> list | None:
+        """Read a MIoT property's stored history (Tasshack's dreame-vacuum route).
+
+        Several dreame models (verified live: dreame.vacuum.r2211o) reject live
+        /miotspec/prop/get reads with -704030013 but publish the property via
+        the /user/get_user_device_data history endpoint. Returns the raw
+        result list (entries carrying "time" and "value"), or None.
+        """
+        body = {"uid": str(self.user_id), "did": str(did),
+                "time_end": 9999999999, "time_start": time_start,
+                "limit": limit, "key": f"{siid}.{piid}", "type": "prop"}
+        resp = self._call(self._api_url(server) + "/user/get_user_device_data",
+                          {"data": json.dumps(body)})
+        try:
+            return resp["result"]
+        except (TypeError, KeyError):
+            return None
+
     def map_url(self, server: str, did: str, map_name: str = "0",
                 endpoint: str = "get_interim_file_url_pro") -> str | None:
         """Mint a signed download URL for one map object.
