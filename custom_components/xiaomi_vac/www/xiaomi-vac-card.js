@@ -842,7 +842,18 @@ class XiaomiVacCard extends HTMLElement {
   }
   _cleanSelected() {
     if (!this._sel.size || !this._enabled("allow_room_cleaning")) return;
-    this._svc("xiaomi_vac", "clean_segment", { entity_id: this._config.vacuum, segments: [...this._sel] });
+    // `_sel` holds display/card ids (what the pixel grid and room colouring
+    // use) — the device's own room-clean action wants its OWN id for that
+    // room, which for viomi can differ from the display id (see map.py's
+    // native_id). Translate at the boundary, right before the service call,
+    // so selection/highlighting code elsewhere never has to care.
+    const m = this._maps()[this._real - this._mapOffset()];
+    const idIndex = roomIndexById((m && m.rooms) || []);
+    const segments = [...this._sel].map((id) => {
+      const r = (m && m.rooms || [])[idIndex[id]];
+      return r && r.native_id != null ? r.native_id : id;
+    });
+    this._svc("xiaomi_vac", "clean_segment", { entity_id: this._config.vacuum, segments });
     this._sel.clear(); this._syncRooms();
   }
 
