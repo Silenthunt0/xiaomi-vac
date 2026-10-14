@@ -339,6 +339,31 @@ def test_map_list_rejects_non_dict_items(monkeypatch):
     assert device.map_list() == []
 
 
+def test_map_list_unwraps_viomi_v22_dict_and_flags_curmapid(monkeypatch):
+    """A {"curmapid","map_list","uid"} wrapper is flattened with "cur" derived from curmapid."""
+    device_mod = load_device_module(monkeypatch)
+    device = device_mod.IjaiVacuumDevice("host", "token", "viomi.vacuum.v22")
+    action = device.profile.map.get_map_list
+    out_piid = action.out_piids[0]
+    FakeMiotDevice.action_results = {
+        (action.siid, action.aiid): {
+            "out": [{
+                "piid": out_piid,
+                "value": (
+                    '{"curmapid": 2, "uid": 12345, "map_list": '
+                    '[{"name": "Downstairs", "id": 1}, {"name": "Upstairs", "id": 2}, '
+                    '{"name": "broken"}, 7]}'
+                ),
+            }]
+        }
+    }
+
+    assert device.map_list() == [
+        {"name": "Downstairs", "id": 1, "cur": False},
+        {"name": "Upstairs", "id": 2, "cur": True},
+    ]
+
+
 def test_status_batches_reads_at_profile_max_properties_on_legacy_v3(monkeypatch):
     """v3 (IJAI_CORE_LEGACY) rejects large batches; profile caps the chunk at 5."""
     device_mod = load_device_module(monkeypatch)

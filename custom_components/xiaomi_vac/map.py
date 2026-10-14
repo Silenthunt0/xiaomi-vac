@@ -270,13 +270,22 @@ class MapFetcher:
         virtual wall and zero rooms. Returns None (falls back to the normal
         binary parser) if this frame doesn't look like this format.
         """
-        brace = unpacked.find(b"{")
-        if brace < 0:
-            return None
-        try:
-            meta = json.loads(unpacked[brace:])
-        except (ValueError, UnicodeDecodeError):
-            return None
+        # A bare 0x7b can sit anywhere in the header (a map id of 123, say)
+        # or in the pixel grid, so look for the object's opening '{"' and
+        # keep trying later candidates until one actually parses as JSON.
+        meta = None
+        search_from = 0
+        while True:
+            brace = unpacked.find(b'{"', search_from)
+            if brace < 0:
+                return None
+            try:
+                meta = json.loads(unpacked[brace:])
+            except (ValueError, UnicodeDecodeError):
+                meta = None
+            if isinstance(meta, dict):
+                break
+            search_from = brace + 1
         width, height = meta.get("width"), meta.get("height")
         if not (
             isinstance(width, int) and isinstance(height, int)
@@ -296,12 +305,6 @@ class MapFetcher:
         from vacuum_map_parser_viomi.parsing_buffer import ParsingBuffer
 
         pixel_grid = unpacked[header_len:brace]
-        buf = ParsingBuffer("image", pixel_grid, 0, len(pixel_grid))
-        image, _rooms_raw, cleaned_areas, cleaned_areas_layer = (
-            self._parser._image_parser.parse(buf, width, height)  # noqa: SLF001
-        )
-        if image is None:
-            return None
 
         resolution = float(meta.get("resolution") or 0.05)
         x_min = float(meta.get("x_min") or 0.0)
@@ -325,11 +328,6 @@ class MapFetcher:
             return Point((p.x - x_min) / resolution, (p.y - y_min) / resolution)
 
         map_data = MapData(0, 1)
-        map_data.image = ImageData(
-            width * height, 0, 0, height, width,
-            self._parser._image_config, image, to_image,  # noqa: SLF001
-            additional_layers={Drawable.CLEANED_AREA: cleaned_areas_layer},
-        )
         # "autoArea" is this device's room list: [{"id","name","pos":[x,y]}],
         # millimetres. It's a label ANCHOR POINT only — no boundary/polygon —
         # so each Room gets a zero-area bbox at that point. That's enough for
@@ -388,24 +386,53 @@ class MapFetcher:
             native_room_ids[card_id] = rid
         map_data.rooms = rooms
         map_data._viomi_native_room_ids = native_room_ids  # noqa: SLF001
-        map_data.cleaned_rooms = cleaned_areas
 
         # The pixel grid encodes room membership too — confirmed values 1..9
         # (exactly this map's room ids) alongside 0x00/0x7f/0xff (outside/
-        # undiscovered/wall) once rooms exist. Trace outlines with the same
-        # cell-mask tracer `extract_json_grid` uses, so the card gets real
-        # room fills/outlines instead of only the label points above.
+        # undiscovered/wall) once rooms exist. Remap those cells onto the
+        # card ids FIRST so the same grid feeds both ViomiImageParser (which
+        # only colours 10..109 as rooms and logs anything else as an unknown
+        # pixel type) and the outline tracer below. Trace outlines with the
+        # same cell-mask tracer `extract_json_grid` uses, so the card gets
+        # real room fills/outlines instead of only the label points above.
         # Stashed on map_data rather than threaded through vector_map's fixed
         # ijai_grid/json_grid dispatch, which has no slot for "grid already
         # computed by the caller" — fetch() picks this up below.
+        remapped = bytearray(pixel_grid)
+        masks: dict[int, set] = {}
         if rooms:
-            remapped = bytearray(pixel_grid)
-            masks: dict[int, set] = {}
             for i, v in enumerate(pixel_grid):
                 card_id = v + room_id_offset
                 if card_id in rooms:
                     remapped[i] = card_id
                     masks.setdefault(card_id, set()).add((i % width, i // width))
+        remapped = bytes(remapped)
+
+        buf = ParsingBuffer("image", remapped, 0, len(remapped))
+        image, rooms_raw, cleaned_areas, cleaned_areas_layer = (
+            self._parser._image_parser.parse(buf, width, height)  # noqa: SLF001
+        )
+        if image is None:
+            return None
+        map_data.image = ImageData(
+            width * height, 0, 0, height, width,
+            self._parser._image_config, image, to_image,  # noqa: SLF001
+            additional_layers={Drawable.CLEANED_AREA: cleaned_areas_layer},
+        )
+        map_data.cleaned_rooms = cleaned_areas
+        # The image parser's per-room pixel bbox gives each Room a real
+        # extent (metres, same frame as to_image) instead of the zero-area
+        # anchor point; the label position stays at the device's pos.
+        for card_id, (px0, py0, px1, py1) in rooms_raw.items():
+            room = rooms.get(card_id)
+            if room is None:
+                continue
+            room.x0 = x_min + px0 * resolution
+            room.y0 = y_min + py0 * resolution
+            room.x1 = x_min + (px1 + 1) * resolution
+            room.y1 = y_min + (py1 + 1) * resolution
+
+        if rooms:
             map_data._viomi_grid_extra = {  # noqa: SLF001
                 "size": {"x": width, "y": height},
                 "bounds": {
@@ -414,7 +441,7 @@ class MapFetcher:
                     "maxY": y_min + height * resolution,
                 },
                 "resolution": resolution,
-                "grid_rle": map_vector._rle(bytes(remapped)),  # noqa: SLF001
+                "grid_rle": map_vector._rle(remapped),  # noqa: SLF001
                 "room_chains": (
                     map_vector._chains_from_masks(masks) if masks else []  # noqa: SLF001
                 ),
@@ -547,10 +574,8 @@ class MapFetcher:
         except Exception as ex:  # noqa: BLE001
             # Decrypted fine but the parser rejected the frame (corrupt or
             # unexpected layout). The key material is good — keep the enckey.
-            import traceback
             _LOGGER.debug(
-                "Parser rejected map frame at slot %s: %r\n%s",
-                slot, ex, traceback.format_exc(),
+                "Parser rejected map frame at slot %s: %r", slot, ex, exc_info=True,
             )
             attempt.outcome = "parse_rejected"
             return None
