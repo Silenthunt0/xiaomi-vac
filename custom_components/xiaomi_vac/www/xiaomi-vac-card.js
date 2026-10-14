@@ -185,9 +185,9 @@ class XiaomiVacCard extends HTMLElement {
   _relevantChanged(a, b) {
     const eids = [
       this._config.vacuum,
-      `sensor.${this._base()}_battery`,
-      this._config.water || `select.${this._base()}_water_level`,
-      this._config.fan || `select.${this._base()}_fan_speed`,
+      this._batteryEid(),
+      this._waterEid(),
+      this._fanEid(),
       this._activeMapEid(),
       ...CONSUMABLES.map((c) => this._consumableEid(c.key)).filter(Boolean),
     ];
@@ -198,39 +198,47 @@ class XiaomiVacCard extends HTMLElement {
   // isn't guaranteed to match the vacuum's (renamed device, id collision, etc).
   _activeMapEid() {
     if (this._config.activeMap) return this._config.activeMap;
-    if (this._cachedMapEid && this._st(this._cachedMapEid)) return this._cachedMapEid;
+    return this._registryEid("select", "active_map") ||
+      `select.${this._base()}_active_map`;   // fallback if registry lookup misses
+  }
+  // Entity ids are localised on non-English installs (sensor.la_kelly_bateria),
+  // so the battery/fan/water guesses from the vacuum's object_id miss there too.
+  // Explicit card option first, then registry, then the English guess.
+  _batteryEid() {
+    return this._config.battery || this._registryEid("sensor", "battery") ||
+      `sensor.${this._base()}_battery`;
+  }
+  _fanEid() {
+    return this._config.fan || this._registryEid("select", "fan_speed") ||
+      `select.${this._base()}_fan_speed`;
+  }
+  _waterEid() {
+    return this._config.water || this._registryEid("select", "water_level") ||
+      `select.${this._base()}_water_level`;
+  }
+  // Find the entity on the vacuum's device with this translation_key; cached
+  // per key while the hit still has a state. Null when the registry misses.
+  _registryEid(domain, key) {
+    this._regEidCache = this._regEidCache || {};
+    const hit = this._regEidCache[key];
+    if (hit && this._st(hit)) return hit;
     const ents = this._hass && this._hass.entities;
     const vacEnt = ents && ents[this._config.vacuum];
     const deviceId = vacEnt && vacEnt.device_id;
-    if (ents && deviceId) {
-      const found = Object.keys(ents).find((eid) =>
-        eid.startsWith("select.") &&
-        ents[eid].device_id === deviceId &&
-        ents[eid].translation_key === "active_map");
-      if (found) { this._cachedMapEid = found; return found; }
-    }
-    return `select.${this._base()}_active_map`;   // fallback if registry lookup misses
+    if (!ents || !deviceId) return null;
+    const found = Object.keys(ents).find((eid) =>
+      eid.startsWith(domain + ".") &&
+      ents[eid].device_id === deviceId &&
+      ents[eid].translation_key === key);
+    if (found) this._regEidCache[key] = found;
+    return found || null;
   }
   // Same registry-lookup pattern as _activeMapEid(): the consumable sensors'
   // entity_id can carry an area-name prefix HA auto-generates on first setup
   // (e.g. "sensor.nappali_julika_neni_main_brush_life"), so guessing from the
   // vacuum's own object_id would miss them — resolve by device_id + the
   // translation_key sensor.py assigns each one instead.
-  _consumableEid(key) {
-    this._consumEidCache = this._consumEidCache || {};
-    if (this._consumEidCache[key] && this._st(this._consumEidCache[key])) return this._consumEidCache[key];
-    const ents = this._hass && this._hass.entities;
-    const vacEnt = ents && ents[this._config.vacuum];
-    const deviceId = vacEnt && vacEnt.device_id;
-    if (ents && deviceId) {
-      const found = Object.keys(ents).find((eid) =>
-        eid.startsWith("sensor.") &&
-        ents[eid].device_id === deviceId &&
-        ents[eid].translation_key === key);
-      if (found) { this._consumEidCache[key] = found; return found; }
-    }
-    return null;
-  }
+  _consumableEid(key) { return this._registryEid("sensor", key); }
   
   // One row per sensor the integration actually provides.
   _consumableRows() {
@@ -476,8 +484,7 @@ class XiaomiVacCard extends HTMLElement {
     };
     q(".act-locate").onclick = () => this._svc("vacuum", "locate", { entity_id: this._config.vacuum });
     q(".cyc-fan").onclick = () => this._cycleFan();
-    q(".cyc-water").onclick = () =>
-      this._cycleSelect(this._config.water || `select.${this._base()}_water_level`);
+    q(".cyc-water").onclick = () => this._cycleSelect(this._waterEid());
     q(".cyc-map").onclick = () => this._cycleSelect(this._activeMapEid());
     q(".zone-btn").onclick = () => this._toggleZone();
     q(".zonetag").onclick = () => this._confirmZone();
@@ -797,7 +804,7 @@ class XiaomiVacCard extends HTMLElement {
   }
 
   /* ---------------- controls ---------------- */
-  _cycleFan() { this._cycleSelect(this._config.fan || `select.${this._base()}_fan_speed`); }
+  _cycleFan() { this._cycleSelect(this._fanEid()); }
   _cycleSelect(eid) {
     const e = this._st(eid); if (!e) return;
     const opts = e.attributes.options || []; if (!opts.length) return;
@@ -991,7 +998,7 @@ class XiaomiVacCard extends HTMLElement {
     const state = this._effState(vac);
     this._root.style.setProperty("--xv-accent", ACCENT[state] || ACCENT.unknown);
 
-    const battEnt = this._st(`sensor.${this._base()}_battery`);
+    const battEnt = this._st(this._batteryEid());
     const batt = battEnt ? Number(battEnt.state) : (vac && vac.attributes.battery_level);
     const hasBatt = batt != null && !Number.isNaN(batt);
     // No charging flag from the device — docked-and-not-full is the charging tell.
@@ -1049,6 +1056,7 @@ class XiaomiVacCardEditor extends HTMLElement {
         ({
           vacuum: "Vacuum",
           map: "Map camera",
+          battery: "Battery sensor entity",
           fan: "Fan speed select entity",
           water: "Water level select entity",
           activeMap: "Active map select entity",
@@ -1072,6 +1080,7 @@ class XiaomiVacCardEditor extends HTMLElement {
     this._form.schema = [
       { name: "vacuum", required: true, selector: { entity: { domain: "vacuum" } } },
       { name: "map", selector: { entity: { domain: "camera" } } },
+      { name: "battery", selector: { entity: { domain: "sensor" } } },
       { name: "fan", selector: { entity: { domain: "select" } } },
       { name: "water", selector: { entity: { domain: "select" } } },
       { name: "activeMap", selector: { entity: { domain: "select" } } },
