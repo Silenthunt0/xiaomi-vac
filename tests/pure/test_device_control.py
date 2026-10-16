@@ -261,6 +261,147 @@ def test_map_upload_actions_lists_upload_by_mapid_ii_then_upload_by_mapid(monkey
     assert _last_calls() == []
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("[3.456,4.555,0.2,1,5.456,4.555,0.233,0]", (5.456, 4.555, 0.233)),
+        ("[123,3.456,4.555,0.2,1,-1.5,2.25,1.57,1]", (-1.5, 2.25, 1.57)),
+        ('{"deg":0.02,"posArray":[[14,23],[23,22]]}', (23.0, 22.0, 0.0)),
+        ("", None),
+        ("[]", None),
+        ("[1,2,3]", None),
+        ("[1,2,3,4,5,6]", None),
+        (None, None),
+        ("garbage", None),
+        # S10 live sample (2026-10-16): leading pose id, 4 per record
+        ("[1,0.364375,-0.049650,1.732895,0,0.366826,-0.049477,2.266405,0,0.375094,-0.050460,1.423140,0]",
+         (0.375094, -0.050460, 1.423140)),
+        # same, but the robot handed over a half-written trailing record
+        ("[1,0.364375,-0.049650,1.732895,0,0.366826,-0.049477,2.266405,0,0.375094,-0.05",
+         (0.366826, -0.049477, 2.266405)),
+        # trailing garbage token
+        ("[1,0.364375,-0.049650,1.732895,0,0.366826,-0.049477,2.266405,0,x]",
+         (0.366826, -0.049477, 2.266405)),
+    ],
+)
+def test_parse_cleaning_path_position(monkeypatch, raw, expected):
+    device_mod = load_device_module(monkeypatch)
+
+    assert device_mod.parse_cleaning_path_position(raw) == expected
+
+
+def test_status_reads_live_position_only_while_moving(monkeypatch):
+    device_mod = load_device_module(monkeypatch)
+    device = device_mod.IjaiVacuumDevice("host", "token", "ijai.vacuum.v17")
+    path_prop = device.profile.map.current_path
+    FakeMiotDevice.property_values[(path_prop.siid, path_prop.piid)] = "[7,-1.5,2.25,0.5,1]"
+
+    calls = FakeMiotDevice.instances[-1].calls
+
+    FakeMiotDevice.property_values[(2, 1)] = 5  # sweeping
+    moving = device.status()
+    assert moving.activity == "cleaning"
+    assert moving.position == (-1.5, 2.25, 0.5)
+    assert moving.position_source == f"{path_prop.siid}/{path_prop.piid}"
+    assert ("get", path_prop.siid, path_prop.piid) in calls
+
+    FakeMiotDevice.property_values[(2, 1)] = 4  # charging
+    before = len(calls)
+    docked = device.status()
+    assert docked.activity == "docked"
+    assert docked.position is None
+    assert ("get", path_prop.siid, path_prop.piid) not in calls[before:]
+
+
+def test_status_survives_a_failed_or_empty_path_read(monkeypatch):
+    device_mod = load_device_module(monkeypatch)
+    device = device_mod.IjaiVacuumDevice("host", "token", "ijai.vacuum.v17")
+    path_prop = device.profile.map.current_path
+    FakeMiotDevice.property_values[(2, 1)] = 5
+
+    FakeMiotDevice.property_values[(path_prop.siid, path_prop.piid)] = RuntimeError("-1")
+    assert device.status().position is None
+
+    FakeMiotDevice.property_values[(path_prop.siid, path_prop.piid)] = ""
+    status = device.status()
+    assert status.position is None
+    assert status.position_source is None
+    assert status.position_raw is None
+
+    FakeMiotDevice.property_values[(path_prop.siid, path_prop.piid)] = "weird:1;2;3"
+    status = device.status()
+    assert status.position is None
+    assert status.position_source == f"{path_prop.siid}/{path_prop.piid}:unparsed"
+    assert status.position_raw == "str(11):weird:1;2;3"
+
+
+def test_status_fetches_the_path_window_when_the_property_holds_only_a_pose_id(monkeypatch):
+    """S10 shape: 10/5 is '[<pose id>]', the points come from get-cur-path."""
+    device_mod = load_device_module(monkeypatch)
+    device = device_mod.IjaiVacuumDevice("host", "token", "ijai.vacuum.v17")
+    path_prop = device.profile.map.current_path
+    action = device.profile.map.get_current_path
+    FakeMiotDevice.property_values[(2, 1)] = 5
+    FakeMiotDevice.property_values[(path_prop.siid, path_prop.piid)] = "[1792173122]"
+    FakeMiotDevice.action_results[(action.siid, action.aiid)] = {
+        "out": [{"piid": 5, "value": "[1792173092,-5.0,1.0,0.1,1,-5.2,1.1,0.2,1]"}]
+    }
+
+    status = device.status()
+
+    assert status.position == (-5.2, 1.1, 0.2)
+    assert status.position_source == f"{action.siid}/{action.aiid}"
+    assert status.position_raw is None
+    assert (
+        "action", action.siid, action.aiid,
+        [{"piid": 15, "value": 1792173122 - 30}, {"piid": 16, "value": 1792173122}],
+    ) in _last_calls()
+
+
+def test_status_widens_the_path_window_when_the_first_reply_is_empty(monkeypatch):
+    device_mod = load_device_module(monkeypatch)
+    device = device_mod.IjaiVacuumDevice("host", "token", "ijai.vacuum.v17")
+    path_prop = device.profile.map.current_path
+    action = device.profile.map.get_current_path
+    FakeMiotDevice.property_values[(2, 1)] = 5
+    FakeMiotDevice.property_values[(path_prop.siid, path_prop.piid)] = "[100]"
+    replies = iter([{"out": [{"piid": 5, "value": ""}]},
+                    {"out": [{"piid": 5, "value": "[1,-1.0,2.0,0.5,1]"}]}])
+    fake = FakeMiotDevice.instances[-1] if FakeMiotDevice.instances else None
+    original = FakeMiotDevice.call_action_by
+
+    def _reply(self, siid, aiid, params):
+        self.calls.append(("action", siid, aiid, params))
+        return next(replies)
+
+    monkeypatch.setattr(FakeMiotDevice, "call_action_by", _reply)
+    try:
+        status = device.status()
+    finally:
+        monkeypatch.setattr(FakeMiotDevice, "call_action_by", original)
+
+    assert status.position == (-1.0, 2.0, 0.5)
+    actions = [c for c in _last_calls() if c[0] == "action"]
+    assert [[p["value"] for p in c[3]] for c in actions] == [[70, 100], [0, 100]]
+    assert [[p["piid"] for p in c[3]] for c in actions] == [[15, 16], [15, 16]]
+
+
+def test_status_reports_an_unparsed_path_reply(monkeypatch):
+    device_mod = load_device_module(monkeypatch)
+    device = device_mod.IjaiVacuumDevice("host", "token", "ijai.vacuum.v17")
+    path_prop = device.profile.map.current_path
+    action = device.profile.map.get_current_path
+    FakeMiotDevice.property_values[(2, 1)] = 5
+    FakeMiotDevice.property_values[(path_prop.siid, path_prop.piid)] = "[100]"
+    FakeMiotDevice.action_results[(action.siid, action.aiid)] = {"out": [{"piid": 5, "value": "nope"}]}
+
+    status = device.status()
+
+    assert status.position is None
+    assert status.position_source == f"{action.siid}/{action.aiid}:unparsed"
+    assert status.position_raw == "70,100 -> str:nope"
+
+
 def test_map_upload_actions_rejects_a_model_without_map_upload(monkeypatch):
     device_mod = load_device_module(monkeypatch)
     device = device_mod.IjaiVacuumDevice("host", "token", "dreame.vacuum.p2008")

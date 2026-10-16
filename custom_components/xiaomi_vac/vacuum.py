@@ -110,7 +110,19 @@ class XiaomiVacuum(CoordinatorEntity[XiaomiVacuumCoordinator], StateVacuumEntity
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {"fault": self.coordinator.data.fault, "model": self._device.model}
+        data = self.coordinator.data
+        pos = data.position
+        return {
+            "fault": data.fault,
+            "model": self._device.model,
+            # live pose from the local cleaning-path property (metres, dock
+            # origin); None while docked/idle or when the robot reports nothing
+            "position_x": pos[0] if pos else None,
+            "position_y": pos[1] if pos else None,
+            "position_heading": pos[2] if pos else None,
+            "position_source": data.position_source,
+            "position_raw": data.position_raw,
+        }
 
     async def async_start(self) -> None:
         await self.hass.async_add_executor_job(self._device.start)

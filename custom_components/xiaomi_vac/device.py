@@ -80,6 +80,84 @@ class VacuumStatus:
     sewage_tank_status: int | None = None
     water_tank_status: int | None = None
     auto_mop_dry: bool | None = None
+    # (x, y, heading) in metres/radians from the live cleaning-path property,
+    # read over local MIoT while the robot moves; None when docked/idle or
+    # when the property is empty. Independent of the cloud map and its key.
+    position: tuple[float, float, float] | None = None
+    position_source: str | None = None
+    # First 300 chars of the raw property when it could not be parsed, so the
+    # shape can be read off the entity attributes instead of debug logs.
+    position_raw: str | None = None
+
+
+def parse_cleaning_path_position(raw) -> tuple[float, float, float] | None:
+    """Last pose of a cur-cleaning-path string, or None.
+
+    Known shapes (see spec/profiles/viomi.py notes):
+      "[x,y,phi,update, x,y,phi,update, ...]"            (4 per record)
+      "[first_poseid, x,y,phi,update, ...]"              (leading id, then 4 per record)
+      '{"deg":0.02,"posArray":[[14,23],[23,22],...]}'     (grid cells, no heading)
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+            pts = obj.get("posArray") or []
+            x, y = pts[-1][0], pts[-1][1]
+            return float(x), float(y), 0.0
+        except (ValueError, TypeError, IndexError, AttributeError):
+            return None
+    nums = []
+    for token in text.strip("[]").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            nums.append(float(token))
+        except ValueError:
+            break  # a truncated/garbled trailing token ends the usable part
+    # Records are x, y, phi, update(0/1), usually behind a leading pose id.
+    # The list can arrive with a half-written trailing record, so align on
+    # the last *complete* record of each interpretation and accept the one
+    # whose update flag and heading are plausible.
+    for body in (nums[1:], nums):
+        body = body[: len(body) // 4 * 4]
+        if len(body) < 4:
+            continue
+        x, y, phi, update = body[-4:]
+        if update in (0.0, 1.0) and abs(phi) <= 7:
+            return x, y, phi
+    return None
+
+
+def _single_int(raw) -> int | None:
+    """'[1792173122]' or '1792173122' -> 1792173122; anything else -> None."""
+    try:
+        text = str(raw).strip().strip("[]").strip()
+        return int(text) if text.lstrip("-").isdigit() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _action_out_value(out, piid: int):
+    """Pull one output value out of a MIoT action reply, whatever its shape."""
+    if isinstance(out, dict):
+        items = out.get("out") or out.get("result") or []
+    else:
+        items = out or []
+    if isinstance(items, dict):
+        items = [items]
+    for item in items:
+        if isinstance(item, dict) and item.get("piid") == piid:
+            return item.get("value")
+    for item in items:
+        if isinstance(item, dict) and "value" in item:
+            return item["value"]
+    if isinstance(items, list) and items and not isinstance(items[0], dict):
+        return items[0]
+    return None
 
 
 class IjaiVacuumDevice:
@@ -202,8 +280,14 @@ class IjaiVacuumDevice:
                 f"Required property {c.status.siid}/{c.status.piid} read failed: "
                 f"returned {_raw!r}"
             ) from ex
+        activity = c.status_map.get(raw, "idle")
+        position = None
+        position_source = None
+        position_raw = None
+        if activity in ("cleaning", "returning"):
+            position, position_source, position_raw = self._read_live_position()
         return VacuumStatus(
-            activity=c.status_map.get(raw, "idle"),
+            activity=activity,
             raw_status=raw,
             battery=_as_int(vals.get(c.battery)),
             fault=_as_int(vals.get(c.fault)),
@@ -231,7 +315,78 @@ class IjaiVacuumDevice:
             sewage_tank_status=_as_int(vals.get(base.sewage_tank_status)) if base else None,
             water_tank_status=_as_int(vals.get(base.water_tank_status)) if base else None,
             auto_mop_dry=_as_bool(vals.get(base.auto_mop_dry)) if base else None,
+            position=position,
+            position_source=position_source,
+            position_raw=position_raw,
         )
+
+    # How far back (in pose-id units) the get-cur-path window reaches. The S10's
+    # ids look like unix seconds, so this is roughly "the last 30 s of path".
+    _PATH_WINDOW = 30
+
+    def _read_live_position(
+        self,
+    ) -> tuple[tuple[float, float, float] | None, str | None, str | None]:
+        """Robot pose from the live cleaning path, over local MIoT only while
+        moving. Never raises: any failure yields (None, source, raw) so the
+        status poll is unaffected.
+
+        Two firmware shapes: the cur-cleaning-path property either carries the
+        path itself (viomi-style) or, on the S10, just the current pose id
+        ("[1792173122]"); then the path for a window ending at that id is
+        fetched with the get-cur-path action (in: start-point, end-point;
+        out: cur-cleaning-path).
+        """
+        cap = self.profile.map
+        prop = getattr(cap, "current_path", None) if isinstance(cap, MapCapability) else None
+        if prop is None:
+            return None, None, None
+        src = f"{prop.siid}/{prop.piid}"
+        try:
+            raw = self._dev.get_property_by(prop.siid, prop.piid)[0].get("value")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("cur-cleaning-path %s read failed: %s", src, err)
+            return None, None, None
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None, None, None
+        pos = parse_cleaning_path_position(raw)
+        if pos is not None:
+            return pos, src, None
+
+        pose_id = _single_int(raw)
+        action = getattr(cap, "get_current_path", None)
+        if pose_id is None or action is None:
+            text = str(raw)
+            shown = text if len(text) <= 300 else f"{text[:200]} … {text[-100:]}"
+            _LOGGER.debug("cur-cleaning-path %s unparsed (%d chars): %s", src, len(text), shown)
+            return None, f"{src}:unparsed", f"{type(raw).__name__}({len(text)}):{shown}"
+
+        src = f"{action.siid}/{action.aiid}"
+        # Inputs as {"piid","value"} objects: the only form the S10 accepts
+        # (verified by clean_zone; bare values come back "Unable to recover
+        # failed command", the same device-level rejection #7 saw on room clean).
+        in_piids = action.in_piids or ((action.in_piid,) if action.in_piid is not None else ())
+        last_raw = None
+        for start in (max(pose_id - self._PATH_WINDOW, 0), 0):
+            params = [
+                {"piid": piid, "value": value}
+                for piid, value in zip(in_piids, (start, pose_id))
+            ]
+            try:
+                out = self._action(action, params)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("get-cur-path %s(%s,%s) failed: %s", src, start, pose_id, err)
+                return None, f"{src}:failed", f"{start},{pose_id}: {err}"[:300]
+            value = _action_out_value(out, action.out_piids[0] if action.out_piids else prop.piid)
+            pos = parse_cleaning_path_position(value)
+            if pos is not None:
+                return pos, src, None
+            last_raw = f"{start},{pose_id} -> {type(value).__name__}:{str(value)[:300]}"
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            break  # non-empty but unparsed: widening the window won't help
+        _LOGGER.debug("get-cur-path %s unparsed: %s", src, last_raw)
+        return None, f"{src}:unparsed", last_raw
 
     # --- control ---------------------------------------------------------
     def start(self) -> None:
